@@ -1,0 +1,100 @@
+---
+title: "Urban Land Cover"
+author: "Jonas Wallstein"
+date: "2023-11-19"
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+---
+
+```{r}
+knitr::opts_chunk$set(message= FALSE, warning = FALSE)
+```
+
+```{r}
+rm(list = ls())
+library(tidyverse)  # data manipulation
+library(cluster) #clustering
+library(factoextra) # clustering algorithms & visualization
+library(gridExtra) # multiple plotting with ggplot2
+library(mclust) # clustering with mixture model
+library(gclus) # Clustering Graphics package
+# PATH= 'C:/Users/paulr/Documents/PhD/teaching/StatInference/seminar4'
+```
+
+Load Data
+```{r}
+# Read gene data
+df_test <- read_csv("data/testing.csv") 
+df_train <- read_csv("data/training.csv") 
+df <- rbind(df_test, df_train)
+X <- df[,-1]
+y <- df[,1]
+X <- scale(X)
+```
+
+Clustering
+```{r}
+k9 <- kmeans(X, centers = 9, nstart = 10, iter.max = 20)
+fviz_cluster(k9, data = X)
+```
+
+
+
+```{r}
+y_pred <- k9$cluster
+Class <- factor(df$class, levels = 1:9)
+table(Class, y_pred)
+# kmeans_res <- data.frame(y = y, y_pred= y_pred)
+# with(kmeans_res,table(y,y_pred))
+```
+
+
+```{r}
+set.seed(947386)
+wss <- function(k) {
+  kmeans(X, k, nstart = 10)$tot.withinss
+}
+
+# Compute and plot wss for k = 1 to k = 15
+k.values <- 1:15
+
+# extract wss for 2-15 clusters
+wss_values <- map_dbl(k.values, wss)
+
+wss_df <- data.frame(k=k.values, wss= wss_values)
+ggplot(wss_df, aes(x=k,y=wss)) + 
+  geom_point() +
+  geom_line() +
+  xlab("Number of clusters K") +
+  ylab("Total within-clusters sum of squares")
+```
+
+```{r}
+# compute gap statistic
+gap_stat <- clusGap(X, FUN = kmeans, nstart = 20, iter.max = 50, 
+                    K.max = 15, B = 20) 
+
+# Print the result
+print(gap_stat, method = "firstmax")
+```
+
+```{r}
+# plot the gap 
+fviz_gap_stat(gap_stat)
+```
+
+
+
+```{r}
+mod <- Mclust(X, G = 1:20)
+summary(mod$BIC)
+```
+
+
+
+```{r}
+plot(mod, what = "BIC", ylim = range(mod$BIC[,-(1:2)], na.rm = TRUE),
+     legendArgs = list(x = "bottomleft"))
+```

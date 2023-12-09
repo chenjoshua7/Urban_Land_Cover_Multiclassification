@@ -1,0 +1,193 @@
+---
+title: "Multiclass Regression"
+author: "Joshua Chen"
+date: "12/2/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+Loading packages
+
+```{r, result = 'hide'}
+library(bayestestR)
+library(ggplot2)
+library(mombf)
+library(tidyverse)
+library(readr)
+library(glmnet)
+library(caret)
+```
+```{r}
+softmax <- function(x) {
+    exp_x <- exp(x - max(x))  # Subtracting max(x) for numerical stability
+    return(exp_x / sum(exp_x))
+}
+```
+
+
+
+```{r, results = 'hide'}
+X_train <- read_csv("processed_data/X_test.csv")
+X_test <- as.matrix(read_csv("processed_data/X_train.csv"))
+y_train_dum <- read_csv("processed_data/y_test_dum.csv")
+y_test_dum <- read_csv("processed_data/y_train_dum.csv")
+```
+## Simple Logistic Regression
+```{r}
+set.seed(31415)
+class = colnames(y_test_dum)
+lr_result = list()
+
+for (c in class) {
+  # Subset the target variable for the current class
+  y_train_class <- y_train_dum[[c]]
+  
+  # Fit LASSO logistic regression model using cross-validation
+  model_name <- paste('lr_', c, sep = "")
+  X_train_matrix <- as.matrix(X_train)
+  assign(model_name, glm(y_train_class ~ ., data = data.frame(cbind(y_train_class, X_train_matrix)), family = "binomial"))
+  
+  # Predict on the testing set
+  fit.lr <- get(model_name)
+  pred <- predict(fit.lr, newdata = as.data.frame(X_test),  type = "response")
+  
+  # Store the predictions in the result list
+  lr_result[[c]] <- pred
+}
+```
+```{r}
+lr_df <- as.data.frame(lr_result)
+colnames(lr_df) = class
+head(lr_df)
+```
+
+
+```{r}
+lr_df_binary <- apply(lr_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(lr_df)
+  return(binary_row)
+})
+
+lr_df_binary <- as.data.frame(t(lr_df_binary))
+head(lr_df_binary)
+```
+
+
+```{r}
+max_pred_names <- as.factor(colnames(lr_df_binary)[max.col(lr_df_binary, 'first')])
+max_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+conf_matrix = confusionMatrix(max_pred_names, max_test_names)
+conf_matrix
+```
+
+## 10 Fold LASSO CV
+
+```{r}
+set.seed(31415)
+class = colnames(y_test_dum)
+lasso_result = list()
+
+for (c in class) {
+  # Subset the target variable for the current class
+  y_train_class <- y_train_dum[[c]]
+  
+  # Fit LASSO logistic regression model using cross-validation
+  model_name <- paste('lasso_', c, sep = "")
+  assign(model_name, cv.glmnet(x = as.matrix(X_train), y = y_train_class, family = "binomial", alpha = 1, nfolds = 20))
+  
+  # Display the optimal lambda value chosen by cross-validation
+  fit.lasso <- get(model_name)
+  best_lambda <- fit.lasso$lambda.min
+  cat("Optimal Lambda for class", c, ":", best_lambda, "\n")
+  
+  # Predict on the testing set
+  predictions <- predict(fit.lasso, newx = as.matrix(X_test), s = best_lambda, type = "response")
+  
+  # Store the predictions in the result list
+  lasso_result[[c]] <- predictions
+}
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+lasso_df <- as.data.frame(lasso_result)
+colnames(lasso_df) = class
+head(lasso_df)
+```
+
+Selecting Maximum Probability as 1 and 0s elsewhere
+```{r}
+lasso_df_binary <- apply(lasso_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(lasso_df)
+  return(binary_row)
+})
+
+lasso_df_binary <- as.data.frame(t(lasso_df_binary))
+head(lasso_df_binary)
+```
+
+
+```{r}
+max_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(lasso_df_binary, 'first')])
+max_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+conf_matrix = confusionMatrix(max_pred_names, max_test_names)
+conf_matrix
+```
+
+Summary Statistics:
+```{r}
+accuracy <- conf_matrix$byClass[, "Balanced Accuracy"]
+precision <- conf_matrix$byClass[, "Pos Pred Value"]  # Precision
+recall <- conf_matrix$byClass[, "Sensitivity"]        # Recall
+f1_score <- conf_matrix$byClass[, "F1"]
+accuracy
+```
+
+```{r}
+precision
+```
+
+
+## Bayesian Model Selection
+```{r}
+bayes_results = list()
+
+for (c in class) {
+  # Subset the target variable for the current class
+  y_train_class <- y_train_dum[[c]]
+  
+  # Fit Bayes model with Zellnor's non-information prior
+  model_name <- paste('bayes_', c, sep = "")
+  assign(model_name, modelSelection(y_train_class ~ ., data=X_train, priorCoef = zellnerprior(taustd =  1),family = 'binomial',  priorDelta=modelbbprior(1,1)))
+  print(paste(c,":", " model fitted", sep = ""))
+  # Display the optimal lambda value chosen by cross-validation
+  fit.bayes <- get(model_name)
+
+  
+  # Predict on the testing set
+  predictions <- predict(fit.bayes, data = X_test, type = 'response')
+  
+  # Store the predictions in the result list
+  bayes_results[[c]] <- predictions
+}
+```
+
+
+```{r}
+bayes_means <- lapply(bayes_results, function(df) df[, 1])
+bayes_results_df <- data.frame(bayes_means)
+head(bayes_results_df)
+```
+
+```{r}
+dim(X_train)
+```
