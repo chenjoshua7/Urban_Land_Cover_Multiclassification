@@ -30,13 +30,19 @@ softmax <- function(x) {
 ```
 
 
-
 ```{r, results = 'hide'}
 X_train <- read_csv("processed_data/X_test.csv")
 X_test <- as.matrix(read_csv("processed_data/X_train.csv"))
 y_train_dum <- read_csv("processed_data/y_test_dum.csv")
 y_test_dum <- read_csv("processed_data/y_train_dum.csv")
 ```
+
+```{r}
+scaling_model <- preProcess(X_train, method = c("center", "scale"))
+X_train <- predict(scaling_model, newdata = X_train)
+X_test <- predict(scaling_model, newdata = X_test)
+```
+
 ## Simple Logistic Regression
 ```{r}
 set.seed(31415)
@@ -116,7 +122,6 @@ for (c in class) {
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
 
-
 ```{r}
 lasso_df <- as.data.frame(lasso_result)
 colnames(lasso_df) = class
@@ -137,10 +142,10 @@ head(lasso_df_binary)
 
 
 ```{r}
-max_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(lasso_df_binary, 'first')])
-max_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
-conf_matrix = confusionMatrix(max_pred_names, max_test_names)
-conf_matrix
+lassomax_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(lasso_df_binary, 'first')])
+lassomax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+lassoconf_matrix = confusionMatrix(lassomax_pred_names, lassomax_test_names)
+lassoconf_matrix
 ```
 
 Summary Statistics:
@@ -156,6 +161,88 @@ accuracy
 precision
 ```
 
+## LASSO-BIC
+```{r}
+lasso.bic.logistic <- function(y,x,extended=FALSE) {
+  #Select model in LASSO path with best BIC (using LASSO regression estimates)
+  #Input
+  # - y: vector with response variable
+  # - x: design matrix
+  #
+  #Output: list with the following elements
+  # - coef: LASSO-estimated regression coefficient with lambda set via BIC
+  # - ypred: predicted y
+  # - lambda.opt: optimal value of lambda
+  # - lambda: data.frame with bic and number of selected variables for each value of lambda
+  require(glmnet)
+  fit <- glmnet(x=x,y=y,family='binomial',alpha=1)
+  pred <- predict(fit,newx=x,type='response')
+  n <- length(y)
+  p <- colSums(fit$beta!=0) + 1
+  if (!extended){
+    bic <- -2* colSums(y*log(pred)+(1-y)*log(1-pred)) + log(n)*p 
+  } else {
+    bic <- -2* colSums(y*log(pred)+(1-y)*log(1-pred)) + log(n)*p + 2*log(choose(ncol(x),p))
+  }
+  sel <- which.min(bic)
+  beta <- c(fit$a0[sel],fit$beta[,sel]); names(beta)[1]= 'Intercept'
+  ypred <- pred[,sel]
+  ans <- list(model=fit,coef=beta,ypred=ypred,lambda.opt=fit$lambda[sel],lambda=data.frame(lambda=fit$lambda,bic=bic,nvars=p))
+  return(ans)
+}
+```
+
+```{r}
+set.seed(31415)
+class = colnames(y_test_dum)
+bic_result = list()
+
+for (c in class) {
+  # Subset the target variable for the current class
+  y_train_class <- y_train_dum[[c]]
+  
+  # Fit LASSO logistic regression model using cross-validation
+  model_name <- paste('lassobic_', c, sep = "")
+  assign(model_name, lasso.bic.logistic(y=y_train_class,x=as.matrix(X_train)))
+  
+  # Display the optimal lambda value chosen by cross-validation
+  fit.lassobic <- get(model_name)
+  best_lambda <- fit.lassobic$lambda.opt
+  cat("Optimal Lambda for class", c, ":", best_lambda, "\n")
+  
+  # Predict on the testing set
+  predictions <- predict(fit.lassobic$model, newx = X_test, s = best_lambda, type = 'response')
+  
+  # Store the predictions in the result list
+  bic_result[[c]] <- predictions
+}
+```
+
+```{r}
+bic_df <- as.data.frame(bic_result)
+colnames(bic_df) = class
+head(bic_df)
+```
+
+Selecting Maximum Probability as 1 and 0s elsewhere
+```{r}
+bic_df_binary <- apply(bic_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(bic_df)
+  return(binary_row)
+})
+
+bic_df_binary <- as.data.frame(t(bic_df_binary))
+head(bic_df_binary)
+```
+
+
+```{r}
+bicmax_pred_names <- as.factor(colnames(bic_df_binary)[max.col(bic_df_binary, 'first')])
+bicmax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+bicconf_matrix = confusionMatrix(bicmax_pred_names, bicmax_test_names)
+bicconf_matrix
+```
 
 ## Bayesian Model Selection
 ```{r}
@@ -167,14 +254,14 @@ for (c in class) {
   
   # Fit Bayes model with Zellnor's non-information prior
   model_name <- paste('bayes_', c, sep = "")
-  assign(model_name, modelSelection(y_train_class ~ ., data=X_train, priorCoef = zellnerprior(taustd =  1),family = 'binomial',  priorDelta=modelbbprior(1,1)))
+  assign(model_name, modelSelection(y_train_class ~ ., data=X_train, priorCoef = zellnerprior(taustd =  1),family = 'binomial', priorDelta=modelbbprior(1,1)))
   print(paste(c,":", " model fitted", sep = ""))
   # Display the optimal lambda value chosen by cross-validation
   fit.bayes <- get(model_name)
 
   
   # Predict on the testing set
-  predictions <- predict(fit.bayes, data = X_test, type = 'response')
+  predictions <- predict(fit.bayes, newdata = X_test,data = X_train, type= 'response')
   
   # Store the predictions in the result list
   bayes_results[[c]] <- predictions
@@ -188,6 +275,23 @@ bayes_results_df <- data.frame(bayes_means)
 head(bayes_results_df)
 ```
 
+
 ```{r}
-dim(X_train)
+bayes_df_binary <- apply(bayes_results_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(bayes_results_df)
+  return(binary_row)
+})
+
+bayes_df_binary <- as.data.frame(t(bayes_df_binary))
+head(bayes_df_binary)
 ```
+
+Confusion Matrix：
+```{r}
+bayesmax_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(bayes_df_binary, 'first')])
+bayesmax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+bayes_conf_matrix = confusionMatrix(bayesmax_pred_names, bayesmax_test_names)
+bayes_conf_matrix
+```
+
