@@ -1,27 +1,32 @@
 ---
-title: "Multiclass Regression"
-author: "Joshua Chen"
-date: "12/2/2023"
-output: pdf_document
+title: "Code for Regression Learning"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
 Loading packages
 
-```{r, result = 'hide'}
+```{r, include=FALSE}
 library(bayestestR)
+library(ROSE)
 library(ggplot2)
 library(mombf)
 library(tidyverse)
 library(readr)
 library(glmnet)
+library(corrplot)
+library(nnet)
+library(smotefamily)
 library(caret)
 ```
+# Setup and Exploration:
 ```{r}
 softmax <- function(x) {
     exp_x <- exp(x - max(x))  # Subtracting max(x) for numerical stability
@@ -29,10 +34,11 @@ softmax <- function(x) {
 }
 ```
 
-
-```{r, results = 'hide'}
+```{r, include = FALSE}
 X_train <- read_csv("processed_data/X_test.csv")
 X_test <- as.matrix(read_csv("processed_data/X_train.csv"))
+testing <- read_csv("data/training.csv")
+training <- read_csv("data/testing.csv")
 y_train_dum <- read_csv("processed_data/y_test_dum.csv")
 y_test_dum <- read_csv("processed_data/y_train_dum.csv")
 ```
@@ -43,37 +49,60 @@ X_train <- predict(scaling_model, newdata = X_train)
 X_test <- predict(scaling_model, newdata = X_test)
 ```
 
+```{r}
+classification_percentage <- colSums(y_train_dum)/(colSums(y_test_dum)+colSums(y_train_dum))
+classification_percentage
+```
+Covariance Matrix
+```{r}
+cov_matrix <- cov(X_train)
+heatmap(cov_matrix, 
+        Rowv = NA, 
+        Colv = NA, 
+        col = heat.colors(256), 
+        scale = "none", 
+        margins = c(5, 5))
+```
+```{r}
+my_palette <- colorRampPalette(c("blue", "purple", "red"))(256)
+cov_matrix <- cov(X_train[,c('Mean_G','Mean_G_40','Mean_G_60','Mean_G_80','Mean_G_120','Mean_G_140')])
+heatmap(cov_matrix, 
+        Rowv = NA, 
+        Colv = NA, 
+        col = my_palette, 
+        scale = "none", 
+        margins = c(5, 5))
+legend("topleft", legend = c("Low", "Medium", "High"), fill = c('blue','purple','red'), title = "Covariance")
+```
+
+
+# One vs Rest Regression
 ## Simple Logistic Regression
+One vs Rest Regression with every single class:
 ```{r}
 set.seed(31415)
 class = colnames(y_test_dum)
 lr_result = list()
 
 for (c in class) {
-  # Subset the target variable for the current class
   y_train_class <- y_train_dum[[c]]
   
-  # Fit LASSO logistic regression model using cross-validation
   model_name <- paste('lr_', c, sep = "")
   X_train_matrix <- as.matrix(X_train)
   assign(model_name, glm(y_train_class ~ ., data = data.frame(cbind(y_train_class, X_train_matrix)), family = "binomial"))
   
-  # Predict on the testing set
   fit.lr <- get(model_name)
   pred <- predict(fit.lr, newdata = as.data.frame(X_test),  type = "response")
   
-  # Store the predictions in the result list
   lr_result[[c]] <- pred
 }
 ```
+
+Translation to binary data
 ```{r}
 lr_df <- as.data.frame(lr_result)
 colnames(lr_df) = class
-head(lr_df)
-```
 
-
-```{r}
 lr_df_binary <- apply(lr_df, 1, function(row) {
   binary_row <- as.numeric(row == max(row))
   names(binary_row) <- colnames(lr_df)
@@ -84,7 +113,7 @@ lr_df_binary <- as.data.frame(t(lr_df_binary))
 head(lr_df_binary)
 ```
 
-
+Confusion Matrix
 ```{r}
 max_pred_names <- as.factor(colnames(lr_df_binary)[max.col(lr_df_binary, 'first')])
 max_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
@@ -92,44 +121,177 @@ conf_matrix = confusionMatrix(max_pred_names, max_test_names)
 conf_matrix
 ```
 
-## 10 Fold LASSO CV
+```{r}
+accuracy <- conf_matrix$byClass[, "Balanced Accuracy"]
+precision <- conf_matrix$byClass[, "Pos Pred Value"]  # Precision
+recall <- conf_matrix$byClass[, "Sensitivity"]        # Recall
+f1_score <- conf_matrix$byClass[, "F1"]
+mean(precision)
+mean(recall)
+mean(f1_score)
+```
+
+### In-Sample Predfictions
+```{r}
+set.seed(31415)
+class = colnames(y_test_dum)
+lr_insample = list()
+
+for (c in class) {
+  y_train_class <- y_train_dum[[c]]
+
+  model_name <- paste('lr_', c, sep = "")
+  lr_model <-  get(model_name)
+  pred <- predict(lr_model, newdata = as.data.frame(X_train),  type = "response")
+
+  lr_insample[[c]] <- pred
+}
+```
+
+```{r}
+lr_df <- as.data.frame(lr_insample)
+colnames(lr_df) = class
+
+lr_df_binary <- apply(lr_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(lr_df)
+  return(binary_row)
+})
+
+lr_in_binary <- as.data.frame(t(lr_df_binary))
+head(lr_in_binary)
+```
+```{r}
+max_pred_names <- as.factor(colnames(lr_in_binary)[max.col(lr_in_binary, 'first')])
+max_test_names <- as.factor(colnames(y_train_dum)[max.col(y_train_dum, 'first')])
+conf_matrix_insample = confusionMatrix(max_pred_names, max_test_names)
+conf_matrix_insample
+```
+
+## LASSO-AIC
+```{r}
+lasso.aic.logistic <- function(y,x,extended=FALSE) {
+  require(glmnet)
+  fit <- glmnet(x=x,y=y,family='binomial',alpha=1)
+  pred <- predict(fit,newx=x,type='response')
+  n <- length(y)
+  p <- colSums(fit$beta!=0) + 1
+  aic <- -2* colSums(y*log(pred)+(1-y)*log(1-pred)) + 2*p 
+  sel <- which.min(aic)
+  beta <- c(fit$a0[sel],fit$beta[,sel]); names(beta)[1]= 'Intercept'
+  ypred <- pred[,sel]
+  ans <- list(model=fit,coef=beta,ypred=ypred,lambda.opt=fit$lambda[sel],lambda=data.frame(lambda=fit$lambda,aic=aic,nvars=p))
+  return(ans)
+}
+```
+
+
+```{r}
+set.seed(31415)
+class = colnames(y_test_dum)
+aic_result = list()
+aic_insamp = list()
+
+system.time(for (c in class) {
+  y_train_class <- y_train_dum[[c]]
+  
+  model_name <- paste('lassoaic_', c, sep = "")
+  assign(model_name, lasso.aic.logistic(y=y_train_class,x=as.matrix(X_train), extended = FALSE))
+  
+  fit.lassoaic <- get(model_name)
+  best_lambda <- fit.lassoaic$lambda.opt
+  cat("Optimal Lambda for class", c, ":", best_lambda, "\n")
+  
+  predictions <- predict(fit.lassoaic$model, newx = X_test, s = best_lambda, type = 'response')
+  aicinsample <- predict(fit.lassoaic$model, newx = as.matrix(X_train), s = best_lambda, type = 'response')
+  
+  aic_result[[c]] <- predictions
+  aic_insamp[[c]] <- aicinsample
+})
+```
+
+```{r}
+aic_df <- as.data.frame(aic_result)
+colnames(aic_df) = class
+
+aic_df_binary <- apply(aic_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(aic_df)
+  return(binary_row)
+})
+
+aic_df_binary <- as.data.frame(t(aic_df_binary))
+head(aic_df_binary)
+```
+
+```{r}
+aicmax_pred_names <- as.factor(colnames(aic_df_binary)[max.col(aic_df_binary, 'first')])
+aicmax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+aicconf_matrix = confusionMatrix(aicmax_pred_names, aicmax_test_names)
+aicconf_matrix
+```
+### In-sample prediction
+```{r}
+accuracy <- aicconf_matrix$byClass[, "Balanced Accuracy"]
+precision <- aicconf_matrix$byClass[, "Pos Pred Value"]  # Precision
+recall <- aicconf_matrix$byClass[, "Sensitivity"]        # Recall
+f1_score <- aicconf_matrix$byClass[, "F1"]
+mean(precision)
+mean(recall)
+mean(f1_score)
+```
+### Lasso AIC - Insample
+```{r}
+lassocv_df <- as.data.frame(aic_insamp)
+colnames(lassocv_df) = class
+
+lassocv_df_binary <- apply(lassocv_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(lassocv_df)
+  return(binary_row)
+})
+
+lassocv_in_binary <- as.data.frame(t(lassocv_df_binary))
+
+lassomax_pred_names <- as.factor(colnames(lassocv_in_binary)[max.col(lassocv_in_binary, 'first')])
+lassomax_test_names <- as.factor(colnames(y_train_dum)[max.col(y_train_dum, 'first')])
+insamp_aic_matrix = confusionMatrix(lassomax_pred_names, lassomax_test_names)
+insamp_aic_matrix
+```
+
+## 20 Fold LASSO CV
 
 ```{r}
 set.seed(31415)
 class = colnames(y_test_dum)
 lasso_result = list()
+lasso_insample = list()
 
-for (c in class) {
-  # Subset the target variable for the current class
+system.time(for (c in class) {
   y_train_class <- y_train_dum[[c]]
   
-  # Fit LASSO logistic regression model using cross-validation
   model_name <- paste('lasso_', c, sep = "")
   assign(model_name, cv.glmnet(x = as.matrix(X_train), y = y_train_class, family = "binomial", alpha = 1, nfolds = 20))
-  
-  # Display the optimal lambda value chosen by cross-validation
+
   fit.lasso <- get(model_name)
   best_lambda <- fit.lasso$lambda.min
   cat("Optimal Lambda for class", c, ":", best_lambda, "\n")
   
-  # Predict on the testing set
   predictions <- predict(fit.lasso, newx = as.matrix(X_test), s = best_lambda, type = "response")
-  
-  # Store the predictions in the result list
+  insample_pred <- predict(fit.lasso, newx = as.matrix(X_train), s = best_lambda, type = "response")
+
   lasso_result[[c]] <- predictions
-}
+  lasso_insample[[c]] <- insample_pred
+})
 ```
 
 Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
 
+
 ```{r}
 lasso_df <- as.data.frame(lasso_result)
 colnames(lasso_df) = class
-head(lasso_df)
-```
 
-Selecting Maximum Probability as 1 and 0s elsewhere
-```{r}
 lasso_df_binary <- apply(lasso_df, 1, function(row) {
   binary_row <- as.numeric(row == max(row))
   names(binary_row) <- colnames(lasso_df)
@@ -137,11 +299,7 @@ lasso_df_binary <- apply(lasso_df, 1, function(row) {
 })
 
 lasso_df_binary <- as.data.frame(t(lasso_df_binary))
-head(lasso_df_binary)
-```
 
-
-```{r}
 lassomax_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(lasso_df_binary, 'first')])
 lassomax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
 lassoconf_matrix = confusionMatrix(lassomax_pred_names, lassomax_test_names)
@@ -150,133 +308,175 @@ lassoconf_matrix
 
 Summary Statistics:
 ```{r}
-accuracy <- conf_matrix$byClass[, "Balanced Accuracy"]
-precision <- conf_matrix$byClass[, "Pos Pred Value"]  # Precision
-recall <- conf_matrix$byClass[, "Sensitivity"]        # Recall
-f1_score <- conf_matrix$byClass[, "F1"]
-accuracy
+accuracy <- lassoconf_matrix$byClass[, "Balanced Accuracy"]
+precision <- lassoconf_matrix$byClass[, "Pos Pred Value"]
+recall <- lassoconf_matrix$byClass[, "Sensitivity"]
+f1_score <- lassoconf_matrix$byClass[, "F1"]
+var(precision)
+var(recall)
+var(f1_score)
 ```
 
-```{r}
-precision
-```
-
-## LASSO-BIC
-```{r}
-lasso.bic.logistic <- function(y,x,extended=FALSE) {
-  #Select model in LASSO path with best BIC (using LASSO regression estimates)
-  #Input
-  # - y: vector with response variable
-  # - x: design matrix
-  #
-  #Output: list with the following elements
-  # - coef: LASSO-estimated regression coefficient with lambda set via BIC
-  # - ypred: predicted y
-  # - lambda.opt: optimal value of lambda
-  # - lambda: data.frame with bic and number of selected variables for each value of lambda
-  require(glmnet)
-  fit <- glmnet(x=x,y=y,family='binomial',alpha=1)
-  pred <- predict(fit,newx=x,type='response')
-  n <- length(y)
-  p <- colSums(fit$beta!=0) + 1
-  if (!extended){
-    bic <- -2* colSums(y*log(pred)+(1-y)*log(1-pred)) + log(n)*p 
-  } else {
-    bic <- -2* colSums(y*log(pred)+(1-y)*log(1-pred)) + log(n)*p + 2*log(choose(ncol(x),p))
-  }
-  sel <- which.min(bic)
-  beta <- c(fit$a0[sel],fit$beta[,sel]); names(beta)[1]= 'Intercept'
-  ypred <- pred[,sel]
-  ans <- list(model=fit,coef=beta,ypred=ypred,lambda.opt=fit$lambda[sel],lambda=data.frame(lambda=fit$lambda,bic=bic,nvars=p))
-  return(ans)
-}
-```
+### LASSO In-sample
 
 ```{r}
-set.seed(31415)
-class = colnames(y_test_dum)
-bic_result = list()
+lassocv_df <- as.data.frame(lasso_insample)
+colnames(lassocv_df) = class
 
-for (c in class) {
-  # Subset the target variable for the current class
-  y_train_class <- y_train_dum[[c]]
-  
-  # Fit LASSO logistic regression model using cross-validation
-  model_name <- paste('lassobic_', c, sep = "")
-  assign(model_name, lasso.bic.logistic(y=y_train_class,x=as.matrix(X_train)))
-  
-  # Display the optimal lambda value chosen by cross-validation
-  fit.lassobic <- get(model_name)
-  best_lambda <- fit.lassobic$lambda.opt
-  cat("Optimal Lambda for class", c, ":", best_lambda, "\n")
-  
-  # Predict on the testing set
-  predictions <- predict(fit.lassobic$model, newx = X_test, s = best_lambda, type = 'response')
-  
-  # Store the predictions in the result list
-  bic_result[[c]] <- predictions
-}
-```
-
-```{r}
-bic_df <- as.data.frame(bic_result)
-colnames(bic_df) = class
-head(bic_df)
-```
-
-Selecting Maximum Probability as 1 and 0s elsewhere
-```{r}
-bic_df_binary <- apply(bic_df, 1, function(row) {
+lassocv_df_binary <- apply(lassocv_df, 1, function(row) {
   binary_row <- as.numeric(row == max(row))
-  names(binary_row) <- colnames(bic_df)
+  names(binary_row) <- colnames(lassocv_df)
   return(binary_row)
 })
 
-bic_df_binary <- as.data.frame(t(bic_df_binary))
-head(bic_df_binary)
+lassocv_in_binary <- as.data.frame(t(lassocv_df_binary))
+
+lassomax_pred_names <- as.factor(colnames(lassocv_in_binary)[max.col(lassocv_in_binary, 'first')])
+lassomax_test_names <- as.factor(colnames(y_train_dum)[max.col(y_train_dum, 'first')])
+insamp_lasso_matrix = confusionMatrix(lassomax_pred_names, lassomax_test_names)
+insamp_lasso_matrix
 ```
 
-
-```{r}
-bicmax_pred_names <- as.factor(colnames(bic_df_binary)[max.col(bic_df_binary, 'first')])
-bicmax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
-bicconf_matrix = confusionMatrix(bicmax_pred_names, bicmax_test_names)
-bicconf_matrix
-```
-
+ 
 ## Bayesian Model Selection
-```{r}
+```{r, eval= FALSE}
+
 bayes_results = list()
 
-for (c in class) {
-  # Subset the target variable for the current class
+system.time(for (c in class) {
   y_train_class <- y_train_dum[[c]]
   
-  # Fit Bayes model with Zellnor's non-information prior
   model_name <- paste('bayes_', c, sep = "")
-  assign(model_name, modelSelection(y_train_class ~ ., data=X_train, priorCoef = zellnerprior(taustd =  1),family = 'binomial', priorDelta=modelbbprior(1,1)))
+  assign(model_name, modelSelection(y_train_class ~ ., data=X_train, priorCoef = zellnerprior(taustd =  1), family = 'binomial', priorDelta=modelbbprior(1,1), niter = 2500))
   print(paste(c,":", " model fitted", sep = ""))
-  # Display the optimal lambda value chosen by cross-validation
   fit.bayes <- get(model_name)
-
   
-  # Predict on the testing set
   predictions <- predict(fit.bayes, newdata = X_test,data = X_train, type= 'response')
+  #predictions <- 1/(1 + e^-predictions)
   
-  # Store the predictions in the result list
   bayes_results[[c]] <- predictions
+})
+```
+
+
+### Convergence Plots (See back for actual plots):
+```{r}
+if (!file.exists("conv_plots")) {
+  dir.create("conv_plots")
 }
 ```
 
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_asphalt$postSample),ncol=ncol(bayes_asphalt$postSample))
+for (j in 1:ncol(bayes_asphalt$postSample)) {
+  margppest[,j]= cumsum(bayes_asphalt$postSample[,j])/(1:nrow(bayes_asphalt$postSample))
+}
 
-```{r}
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Asphalt Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+
+```
+
+```{r, eval= FALSE}
+margppest = matrix(NA,nrow=nrow(bayes_building$postSample),ncol=ncol(bayes_building$postSample))
+for (j in 1:ncol(bayes_building$postSample)) {
+  margppest[,j]= cumsum(bayes_building$postSample[,j])/(1:nrow(bayes_building$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Building Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_car$postSample),ncol=ncol(bayes_car$postSample))
+for (j in 1:ncol(bayes_car$postSample)) {
+  margppest[,j]= cumsum(bayes_car$postSample[,j])/(1:nrow(bayes_car$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Car Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_concrete$postSample),ncol=ncol(bayes_concrete$postSample))
+for (j in 1:ncol(bayes_concrete$postSample)) {
+  margppest[,j]= cumsum(bayes_concrete$postSample[,j])/(1:nrow(bayes_concrete$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Concrete Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_grass$postSample),ncol=ncol(bayes_grass$postSample))
+for (j in 1:ncol(bayes_grass$postSample)) {
+  margppest[,j]= cumsum(bayes_grass$postSample[,j])/(1:nrow(bayes_grass$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Grass Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_pool$postSample),ncol=ncol(bayes_pool$postSample))
+for (j in 1:ncol(bayes_pool$postSample)) {
+  margppest[,j]= cumsum(bayes_pool$postSample[,j])/(1:nrow(bayes_pool$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Pool Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_tree$postSample),ncol=ncol(bayes_tree$postSample))
+for (j in 1:ncol(bayes_tree$postSample)) {
+  margppest[,j]= cumsum(bayes_tree$postSample[,j])/(1:nrow(bayes_tree$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Tree Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(bayes_soil$postSample),ncol=ncol(bayes_soil$postSample))
+for (j in 1:ncol(bayes_soil$postSample)) {
+  margppest[,j]= cumsum(bayes_soil$postSample[,j])/(1:nrow(bayes_soil$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Soil Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+```{r, eval= FALSE}
+margppest= matrix(NA,nrow=nrow(hi$postSample),ncol=ncol(hi$postSample))
+for (j in 1:ncol(hi$postSample)) {
+  margppest[,j]= cumsum(hi$postSample[,j])/(1:nrow(hi$postSample))
+}
+
+par(mar=c(4,5,1,1), cex.lab=1, cex.axis=1)
+plot(margppest[,1], type='l', ylim=c(0,1), xlab='Gibbs iteration', ylab='Estimated P(gamma_j=1 | y)', main='Shadow Convergence')
+for (j in 2:ncol(margppest)) lines(margppest[,j])
+```
+
+
+
+```{r, eval= FALSE}
 bayes_means <- lapply(bayes_results, function(df) df[, 1])
 bayes_results_df <- data.frame(bayes_means)
 head(bayes_results_df)
 ```
 
-
-```{r}
+```{r, eval= FALSE}
 bayes_df_binary <- apply(bayes_results_df, 1, function(row) {
   binary_row <- as.numeric(row == max(row))
   names(binary_row) <- colnames(bayes_results_df)
@@ -287,11 +487,144 @@ bayes_df_binary <- as.data.frame(t(bayes_df_binary))
 head(bayes_df_binary)
 ```
 
-Confusion Matrix：
-```{r}
+Confusion Matrix:
+```{r, eval= FALSE}
 bayesmax_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(bayes_df_binary, 'first')])
 bayesmax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
 bayes_conf_matrix = confusionMatrix(bayesmax_pred_names, bayesmax_test_names)
 bayes_conf_matrix
 ```
+```{r, eval = FALSE}
+accuracy <- bayes_conf_matrix$byClass[, "Balanced Accuracy"]
+precision <- bayes_conf_matrix$byClass[, "Pos Pred Value"]
+recall <- bayes_conf_matrix$byClass[, "Sensitivity"]
+f1_score <- bayes_conf_matrix$byClass[, "F1"]
+mean(precision)
+mean(recall)
+mean(f1_score)
+```
+# One-vs-One Regression
+```{r}
+y_train <- training[,1]
+y_test <- testing[,1]
+```
 
+```{r}
+models <- list()
+
+class_pairs <- combn(class, 2, simplify = TRUE)
+
+for (i in seq_len(ncol(class_pairs))) {
+  pair <- class_pairs[, i]
+
+  first_class <- pair[1]
+  second_class <- pair[2]
+  wanted_classes <- y_train_dum[, first_class] | y_train_dum[, second_class]
+  train_subset <- X_train[wanted_classes, ]
+  y_train_subset <- y_train_dum[wanted_classes, first_class]
+
+
+  model <- cv.glmnet(x = as.matrix(train_subset), 
+                     y = as.numeric(as.matrix(y_train_subset)), 
+                     family = "binomial", 
+                     alpha = 1, 
+                     nfolds = 20)
+  
+  models[[paste(pair, collapse = "_vs_")]] <- model
+}
+```
+
+```{r}
+predictions <- data.frame(matrix(NA, nrow = nrow(X_test), ncol = 0))
+
+for (i in seq_len(length(models))) {
+  pair <- names(models)[i]
+  model <- models[[i]]
+  
+  predictions[pair] <- predict(model, newx = as.matrix(X_test), type = 'response')
+  classes  <- strsplit(pair, "_vs_")[[1]]
+  predictions[pair] <- ifelse(predictions[pair]>0.5,classes[1],classes[2])
+}
+```
+
+```{r}
+final_predictions <- apply(predictions, 1, function(row) {
+  names(which.max(table(unlist(row))))
+})
+
+ovo_conf_mat <- confusionMatrix(data = as.factor(final_predictions), as.factor(y_test$class))
+ovo_conf_mat
+```
+
+Without ties:
+```{r}
+tied_rows <- list()
+
+for (i in 1:nrow(predictions)) {
+  predictions_row <- table(unlist(predictions[i,]))
+  top_predict <- order(-predictions_row)
+  if (as.integer(predictions_row[top_predict[1]]) == as.integer(predictions_row[top_predict[2]])) {
+    tied_rows <- c(tied_rows, list(i))
+  }
+}
+```
+
+```{r}
+fp_noties <- final_predictions[-unlist(tied_rows)]
+ref_noties <- y_test$class[-unlist(tied_rows)]
+
+ovo_conf_mat <- confusionMatrix(data = as.factor(fp_noties), as.factor(ref_noties))
+ovo_conf_mat
+```
+
+# SMOTE Oversampling:
+
+```{r}
+for (c in class) {
+  y_train_class <- y_train_dum[[c]]
+  oversampled_data <- ovun.sample(y_train_class ~ ., data = cbind(X_train, y_train_class), method = "over", N = 900, seed = 123)$data
+  
+  X_train_oversampled <- oversampled_data[, -which(names(oversampled_data) == "y_train_class")]
+  y_train_oversampled <- oversampled_data$y_train_class
+  
+  model_name <- paste('lasso_', c, '_oversampled', sep = "")
+  assign(model_name, cv.glmnet(x = as.matrix(X_train_oversampled), y = y_train_oversampled, family = "binomial", alpha = 1, nfolds = 20))
+
+  fit_lasso_oversampled <- get(model_name)
+  best_lambda_oversampled <- fit_lasso_oversampled$lambda.min
+  cat("Optimal Lambda for class", c, "with SMOTE oversampling:", best_lambda_oversampled, "\n")
+  
+  predictions <- predict(fit_lasso_oversampled, newx = as.matrix(X_test), s = best_lambda_oversampled, type = "response")
+  
+  lasso_result[[c]] <- predictions
+}
+```
+
+```{r}
+lasso_df <- as.data.frame(lasso_result)
+colnames(lasso_df) = class
+
+lasso_df_binary <- apply(lasso_df, 1, function(row) {
+  binary_row <- as.numeric(row == max(row))
+  names(binary_row) <- colnames(lasso_df)
+  return(binary_row)
+})
+
+lasso_df_binary <- as.data.frame(t(lasso_df_binary))
+
+lassomax_pred_names <- as.factor(colnames(lasso_df_binary)[max.col(lasso_df_binary, 'first')])
+lassomax_test_names <- as.factor(colnames(y_test_dum)[max.col(y_test_dum, 'first')])
+lasso_oversamp_matrix = confusionMatrix(lassomax_pred_names, lassomax_test_names)
+lasso_oversamp_matrix
+```
+
+
+```{r}
+accuracy <- lasso_oversamp_matrix$byClass[, "Balanced Accuracy"]
+precision <- lasso_oversamp_matrix$byClass[, "Pos Pred Value"]
+recall <- lasso_oversamp_matrix$byClass[, "Sensitivity"]
+f1_score <- lasso_oversamp_matrix$byClass[, "F1"]
+var(precision)
+var(recall)
+var(f1_score)
+```
