@@ -25,7 +25,7 @@ explained in the data section.
 
 The goal of this thesis is to classify the urban land cover objects in a setting with a high dimensional
 feature space. Thus, we use logistic and multinomial regressions with LASSO and Bayesian model
-selection. Further, we assess the performance of di↵erent clustering methods in di↵erentiating the
+selection. Further, we assess the performance of different clustering methods in differentiating the
 actual number of clusters that correspond to our nine types of land cover. This thesis proceeds with
 a summary of related work and the data used. Then we use regression and unsupervised learning
 and finally discuss our methodology and findings.
